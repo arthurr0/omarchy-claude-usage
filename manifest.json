@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "local.claude-usage",
+  "id": "io.github.arthurr0.claude-usage",
   "name": "Claude Usage",
   "version": "1.0.0",
   "author": "Artur Kolecki",

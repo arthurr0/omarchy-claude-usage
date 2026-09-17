@@ -12,7 +12,7 @@ import "Model.js" as Model
 // the bar, the Claude Code statusline and the popup always agree.
 Panel {
   id: root
-  moduleName: "local.claude-usage"
+  moduleName: "io.github.arthurr0.claude-usage"
   ipcTarget: "claude-usage"
   manageIpc: false
 

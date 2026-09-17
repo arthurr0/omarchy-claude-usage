@@ -25,7 +25,7 @@ which carries the Plasma, GNOME, Waybar, Polybar, macOS and Windows variants.
 
 ## Install
 
-From git, which leaves a checkout in `~/.config/omarchy/plugins/local.claude-usage/`
+From git, which leaves a checkout in `~/.config/omarchy/plugins/io.github.arthurr0.claude-usage/`
 that `omarchy plugin update` keeps current:
 
 ```bash
@@ -42,8 +42,19 @@ Or from a local clone:
 Requirements: Omarchy 4 with `omarchy-shell`, `python3` and `jq` (both ship
 with Omarchy), and a Claude Code login so the OAuth token exists.
 
-Move the widget with `omarchy bar move local.claude-usage --section center`,
-remove it with `omarchy plugin disable local.claude-usage`.
+Move the widget with `omarchy bar move io.github.arthurr0.claude-usage --section center`.
+
+## Remove
+
+```bash
+omarchy plugin disable io.github.arthurr0.claude-usage   # take it out of the bar, keep the files
+omarchy plugin remove io.github.arthurr0.claude-usage    # delete the plugin directory as well
+```
+
+If you used `./install.sh --statusline`, also delete `~/.local/bin/claude-usage`
+and `~/.local/bin/claude-usage-statusline` and drop the `statusLine` key from
+`~/.claude/settings.json` (the installer left a `settings.json.bak.<timestamp>`
+copy next to it). Cached API answers live in `~/.cache/claude-usage/`.
 
 ## Using it
 
@@ -77,7 +88,7 @@ and script path. Every change is written straight to
 defaults" restores every value.
 
 The same keys can be set from a terminal with
-`omarchy bar set local.claude-usage <key> <value>` (add `--json` for numbers
+`omarchy bar set io.github.arthurr0.claude-usage <key> <value>` (add `--json` for numbers
 and booleans) or edited on the widget's entry in `shell.json`:
 
 | Key | Default | Meaning |
