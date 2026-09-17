@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "id": "local.claude-usage",
+  "name": "Claude Usage",
+  "version": "1.0.0",
+  "author": "Artur Kolecki",
+  "license": "MIT",
+  "description": "Claude subscription limits (5-hour session and weekly windows) in the Omarchy bar, with a popup showing every window, its meter and reset time.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Claude Usage",
+    "description": "Bar pill with the busiest Claude limit window and a popup listing every window with a meter and reset countdown.",
+    "category": "AI",
+    "aliases": [
+      "claude-usage",
+      "claude"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "barMode": "highest",
+      "barStyle": "text",
+      "showSession": true,
+      "showWeekly": true,
+      "showScoped": true,
+      "refreshIntervalSec": 120,
+      "warnPercent": 70,
+      "criticalPercent": 90,
+      "warningColor": "#f67400",
+      "criticalColor": "",
+      "icon": "󰚩",
+      "command": "",
+      "onRightClick": ""
+    },
+    "schema": [
+      {
+        "key": "barMode",
+        "type": "enum",
+        "label": "Bar shows",
+        "options": [
+          "highest",
+          "all",
+          "icon"
+        ],
+        "defaultValue": "highest",
+        "description": "highest: the most used window only; all: every window; icon: just the icon (details stay in the tooltip and popup)."
+      },
+      {
+        "key": "barStyle",
+        "type": "enum",
+        "label": "Bar style",
+        "options": [
+          "text",
+          "bars"
+        ],
+        "defaultValue": "text",
+        "description": "text: '5h 12%' labels; bars: thin stacked meters."
+      },
+      {
+        "key": "showSession",
+        "type": "boolean",
+        "label": "Show 5-hour session window in bar",
+        "defaultValue": true
+      },
+      {
+        "key": "showWeekly",
+        "type": "boolean",
+        "label": "Show weekly (all models) window in bar",
+        "defaultValue": true
+      },
+      {
+        "key": "showScoped",
+        "type": "boolean",
+        "label": "Show model-scoped weekly windows in bar",
+        "defaultValue": true
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 30,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 120
+      },
+      {
+        "key": "warnPercent",
+        "type": "integer",
+        "label": "Warning threshold (%)",
+        "min": 0,
+        "max": 100,
+        "step": 5,
+        "defaultValue": 70
+      },
+      {
+        "key": "criticalPercent",
+        "type": "integer",
+        "label": "Critical threshold (%)",
+        "min": 0,
+        "max": 100,
+        "step": 5,
+        "defaultValue": 90
+      },
+      {
+        "key": "warningColor",
+        "type": "string",
+        "label": "Warning colour",
+        "defaultValue": "#f67400",
+        "description": "Hex colour; empty keeps the theme foreground."
+      },
+      {
+        "key": "criticalColor",
+        "type": "string",
+        "label": "Critical colour",
+        "defaultValue": "",
+        "description": "Hex colour; empty uses the theme's urgent colour."
+      },
+      {
+        "key": "icon",
+        "type": "string",
+        "label": "Bar icon",
+        "defaultValue": "󰚩",
+        "description": "Nerd Font glyph shown before the value; empty hides it."
+      },
+      {
+        "key": "command",
+        "type": "path",
+        "label": "claude-usage script",
+        "defaultValue": "",
+        "description": "Optional. Path to a claude-usage script; empty runs the copy bundled with the plugin."
+      },
+      {
+        "key": "onRightClick",
+        "type": "string",
+        "label": "Right-click command",
+        "defaultValue": "",
+        "description": "Optional shell command, e.g. omarchy-launch-or-focus-tui claude."
+      }
+    ]
+  }
+}

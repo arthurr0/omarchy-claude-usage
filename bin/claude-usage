@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+import argparse
+import datetime
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+HOME = pathlib.Path.home()
+CREDENTIALS = HOME / ".claude" / ".credentials.json"
+KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+
+def cache_root():
+    if os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        return pathlib.Path(os.environ["LOCALAPPDATA"])
+    if os.environ.get("XDG_CACHE_HOME"):
+        return pathlib.Path(os.environ["XDG_CACHE_HOME"])
+    return HOME / ".cache"
+
+
+CACHE_DIR = cache_root() / "claude-usage"
+API_CACHE = CACHE_DIR / "api.json"
+STATUSLINE_CACHE = CACHE_DIR / "statusline.json"
+
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage?at_wall=1&skip_spend=1"
+BETA_HEADER = "oauth-2025-04-20"
+USER_AGENT = "claude-usage/1.2.0"
+
+API_CACHE_MAX_AGE = 24 * 3600
+ORDER = {"session": 0, "weekly_all": 1, "weekly_scoped": 2}
+KINDS = ("session", "weekly_all", "weekly_scoped")
+FORMATS = ("json", "plain", "waybar", "polybar")
+SOURCE_NAMES = {"api": "API", "statusline": "statusline", "mixed": "API and statusline"}
+DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def now():
+    return int(time.time())
+
+
+def read_json(path):
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None
+
+
+def write_json(path, payload):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
+def parse_reset(value):
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(datetime.datetime.fromisoformat(value.strip().replace("Z", "+00:00")).timestamp())
+        except Exception:
+            return None
+    return None
+
+
+def make_window(kind, scope, percent, resets_at, severity, source, fetched_at):
+    if not isinstance(percent, (int, float)):
+        return None
+    key = kind if not scope else "%s:%s" % (kind, scope)
+    return {
+        "key": key,
+        "kind": kind,
+        "scope": scope,
+        "pct": round(float(percent), 1),
+        "resets_at": parse_reset(resets_at),
+        "severity": severity or "normal",
+        "source": source,
+        "fetched_at": fetched_at,
+    }
+
+
+def windows_from_api(payload):
+    if not isinstance(payload, dict):
+        return {}
+    raw = payload.get("raw")
+    fetched_at = int(payload.get("fetched_at") or 0)
+    if not isinstance(raw, dict):
+        return {}
+
+    windows = {}
+    entries = raw.get("limits")
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            scope = None
+            model = ((entry.get("scope") or {}).get("model") or {}).get("display_name")
+            if model:
+                scope = model
+            window = make_window(
+                entry.get("kind"),
+                scope,
+                entry.get("percent"),
+                entry.get("resets_at"),
+                entry.get("severity"),
+                "api",
+                fetched_at,
+            )
+            if window and window["kind"]:
+                windows[window["key"]] = window
+
+    fallback = (("five_hour", "session", None), ("seven_day", "weekly_all", None), ("seven_day_opus", "weekly_scoped", "Opus"))
+    for name, kind, scope in fallback:
+        block = raw.get(name)
+        if not isinstance(block, dict):
+            continue
+        window = make_window(kind, scope, block.get("utilization"), block.get("resets_at"), None, "api", fetched_at)
+        if window and window["key"] not in windows:
+            windows[window["key"]] = window
+    return windows
+
+
+def windows_from_statusline():
+    payload = read_json(STATUSLINE_CACHE)
+    if not isinstance(payload, dict):
+        return {}
+    limits = payload.get("rate_limits")
+    if not isinstance(limits, dict):
+        return {}
+    fetched_at = int(payload.get("fetched_at") or 0)
+    windows = {}
+    for name, kind in (("five_hour", "session"), ("seven_day", "weekly_all")):
+        block = limits.get(name)
+        if not isinstance(block, dict):
+            continue
+        window = make_window(kind, None, block.get("used_percentage"), block.get("resets_at"), None, "statusline", fetched_at)
+        if window:
+            windows[window["key"]] = window
+    return windows
+
+
+def merge(primary, secondary):
+    merged = dict(secondary)
+    for key, window in primary.items():
+        current = merged.get(key)
+        if not current or window["fetched_at"] >= current["fetched_at"]:
+            merged[key] = window
+    return merged
+
+
+def finalize(windows):
+    current = now()
+    result = []
+    for window in windows.values():
+        resets_at = window["resets_at"]
+        expired = bool(resets_at) and resets_at <= current
+        result.append(
+            {
+                "key": window["key"],
+                "kind": window["kind"],
+                "scope": window["scope"],
+                "pct": 0.0 if expired else window["pct"],
+                "resets_at": resets_at,
+                "expired": expired,
+                "severity": window["severity"],
+                "source": window["source"],
+                "age": max(0, current - window["fetched_at"]) if window["fetched_at"] else None,
+            }
+        )
+    result.sort(key=lambda item: (ORDER.get(item["kind"], 9), item["scope"] or ""))
+    return result
+
+
+def read_keychain():
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads(result.stdout.strip())
+    except Exception:
+        return None
+
+
+def load_credentials():
+    data = None
+    if sys.platform == "darwin":
+        data = read_keychain()
+    if not isinstance(data, dict):
+        data = read_json(CREDENTIALS)
+    if not isinstance(data, dict):
+        return None
+    oauth = data.get("claudeAiOauth")
+    if not isinstance(oauth, dict) or not oauth.get("accessToken"):
+        return None
+    return oauth
+
+
+def fetch_api(oauth):
+    if not oauth:
+        return None, "no OAuth token"
+    expires_at = oauth.get("expiresAt")
+    if isinstance(expires_at, (int, float)) and expires_at / 1000.0 < time.time():
+        return None, "token expired, start Claude Code"
+    request = urllib.request.Request(
+        USAGE_URL,
+        headers={
+            "Authorization": "Bearer " + oauth["accessToken"],
+            "anthropic-beta": BETA_HEADER,
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            body = json.loads(response.read().decode())
+    except urllib.error.HTTPError as error:
+        return None, "API: HTTP %d" % error.code
+    except urllib.error.URLError:
+        return None, "no connection"
+    except Exception as error:
+        return None, "API: %s" % type(error).__name__
+    payload = {"fetched_at": now(), "plan": oauth.get("subscriptionType"), "raw": body}
+    write_json(API_CACHE, payload)
+    return payload, None
+
+
+def long_label(window):
+    if window["kind"] == "session":
+        return "Session (5h)"
+    if window["kind"] == "weekly_all":
+        return "Weekly (all models)"
+    if window["kind"] == "weekly_scoped":
+        return "Weekly (%s)" % (window["scope"] or "scoped")
+    return window["key"]
+
+
+def short_label(window):
+    if window["kind"] == "session":
+        return "5h"
+    if window["kind"] == "weekly_all":
+        return "7d"
+    if window["kind"] == "weekly_scoped":
+        return "7d %s" % window["scope"] if window["scope"] else "7d scoped"
+    return window["key"]
+
+
+def state_of(pct, warn, critical):
+    if pct >= critical:
+        return "critical"
+    if pct >= warn:
+        return "warning"
+    return "normal"
+
+
+def format_countdown(timestamp, current):
+    diff = timestamp - current
+    if diff <= 0:
+        return "now"
+    days, rest = divmod(diff, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    if days > 0:
+        return "%dd %dh" % (days, hours)
+    if hours > 0:
+        return "%dh %dm" % (hours, minutes)
+    return "%dm" % max(1, minutes)
+
+
+def format_clock(timestamp):
+    moment = datetime.datetime.fromtimestamp(timestamp)
+    text = moment.strftime("%H:%M")
+    if moment.date() == datetime.date.today():
+        return text
+    return "%s %s" % (DAY_NAMES[moment.weekday()], text)
+
+
+def reset_text(window, current):
+    if window["expired"]:
+        return "window renewed"
+    if not window["resets_at"]:
+        return "no reset information"
+    return "resets in %s (%s)" % (format_countdown(window["resets_at"], current), format_clock(window["resets_at"]))
+
+
+def select_windows(windows, show, highest_only):
+    picked = [window for window in windows if window["kind"] in show]
+    if highest_only and picked:
+        picked = [max(picked, key=lambda window: window["pct"])]
+    return picked
+
+
+def selected_windows(output):
+    return [window for window in output["windows"] if window["selected"]]
+
+
+def highest_of(windows):
+    if not windows:
+        return None
+    return max(windows, key=lambda window: window["pct"])
+
+
+def compact_text(window):
+    return "%s %d%%" % (window["short_label"], round(window["pct"]))
+
+
+def decorate(output, args):
+    current = output["updated_at"]
+    colors = {"warning": args.color_warning, "critical": args.color_critical}
+    picked = {window["key"] for window in select_windows(output["windows"], args.show, args.highest_only)}
+    for window in output["windows"]:
+        state = state_of(window["pct"], args.warn, args.critical)
+        window["label"] = long_label(window)
+        window["short_label"] = short_label(window)
+        window["state"] = state
+        window["color"] = colors.get(state)
+        window["reset_text"] = reset_text(window, current)
+        window["selected"] = window["key"] in picked
+    selected = selected_windows(output)
+    output["text"] = " · ".join(compact_text(window) for window in selected) if selected else (output["error"] or "no data")
+
+
+def detail_lines(output):
+    lines = ["%s: %d%%, %s" % (window["label"], round(window["pct"]), window["reset_text"]) for window in output["windows"]]
+    footer = []
+    if output["windows"]:
+        footer.append("updated " + format_clock(output["updated_at"]))
+    if output["source_name"]:
+        footer.append("source: " + output["source_name"])
+    if output["error"]:
+        footer.append(output["error"])
+    if footer:
+        lines.append(" · ".join(footer))
+    return lines
+
+
+def render_plain(output, args):
+    return output["text"]
+
+
+def render_waybar(output, args):
+    highest = highest_of(selected_windows(output))
+    state = highest["state"] if highest else "error"
+    payload = {
+        "text": output["text"],
+        "tooltip": "\n".join(detail_lines(output)),
+        "class": state,
+        "alt": state,
+        "percentage": int(round(highest["pct"])) if highest else 0,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def render_polybar(output, args):
+    selected = selected_windows(output)
+    if not selected:
+        return output["text"]
+    parts = []
+    for window in selected:
+        text = compact_text(window)
+        if window["color"]:
+            text = "%{F" + window["color"] + "}" + text + "%{F-}"
+        parts.append(text)
+    return " · ".join(parts)
+
+
+RENDERERS = {"plain": render_plain, "waybar": render_waybar, "polybar": render_polybar}
+
+
+def parse_show(value):
+    kinds = [item.strip() for item in value.split(",") if item.strip()]
+    unknown = [kind for kind in kinds if kind not in KINDS]
+    if unknown:
+        raise argparse.ArgumentTypeError("unknown limit kind: %s (expected any of %s)" % (", ".join(unknown), ", ".join(KINDS)))
+    return kinds or list(KINDS)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Reports Claude subscription usage limits.")
+    parser.add_argument("--format", choices=FORMATS, default="json", help="output format (default: json)")
+    parser.add_argument("--show", type=parse_show, default=list(KINDS), help="comma separated limit kinds for the compact text and the selected flag: session, weekly_all, weekly_scoped")
+    parser.add_argument("--highest-only", action="store_true", help="select only the most used of the --show limits")
+    parser.add_argument("--warn", type=int, default=70, help="warning threshold in percent for the state field (default: 70)")
+    parser.add_argument("--critical", type=int, default=90, help="critical threshold in percent for the state field (default: 90)")
+    parser.add_argument("--color-warning", default="#f67400", help="colour attached to the warning state (default: #f67400)")
+    parser.add_argument("--color-critical", default="#da4453", help="colour attached to the critical state (default: #da4453)")
+    parser.add_argument("--no-api", action="store_true", help="use the statusline and API cache only")
+    parser.add_argument("--min-interval", type=int, default=60, help="reuse the cached API answer if younger than this many seconds")
+    parser.add_argument("--pretty", action="store_true", help="json: indent the output")
+    parser.add_argument("--raw", action="store_true", help="print the raw API response")
+    args = parser.parse_args()
+
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+    cached = read_json(API_CACHE)
+    cache_age = now() - int(cached.get("fetched_at", 0)) if isinstance(cached, dict) else None
+
+    oauth = None
+    error = None
+    if args.no_api:
+        payload = cached if cache_age is not None and cache_age < API_CACHE_MAX_AGE else None
+    elif cache_age is not None and cache_age < args.min_interval:
+        payload = cached
+    else:
+        oauth = load_credentials()
+        payload, error = fetch_api(oauth)
+        if payload is None and isinstance(cached, dict) and cache_age is not None and cache_age < API_CACHE_MAX_AGE:
+            payload = cached
+
+    if args.raw:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+
+    windows = finalize(merge(windows_from_api(payload), windows_from_statusline()))
+    sources = {window["source"] for window in windows}
+    source = "none" if not windows else (sources.pop() if len(sources) == 1 else "mixed")
+
+    output = {
+        "ok": bool(windows),
+        "source": source,
+        "source_name": SOURCE_NAMES.get(source),
+        "plan": (payload or {}).get("plan") or (oauth or {}).get("subscriptionType"),
+        "updated_at": now(),
+        "age": min((window["age"] for window in windows if window["age"] is not None), default=None),
+        "text": None,
+        "windows": windows,
+        "error": error or (None if windows else "no limit data"),
+    }
+    decorate(output, args)
+
+    if args.format != "json":
+        print(RENDERERS[args.format](output, args))
+        return 0
+
+    print(json.dumps(output, indent=2 if args.pretty else None, ensure_ascii=False))
+    return 0 if windows else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
