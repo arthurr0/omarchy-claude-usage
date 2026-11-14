@@ -121,6 +121,12 @@ watches `~/.cache/claude-usage/{api,statusline}.json`. A write by the
 statusline hook or by another integration triggers a cheap cache-only re-read,
 so several bars and the Claude Code status line stay in sync.
 
+Claude Code renews the token in `~/.claude/.credentials.json` only when the
+CLI runs, and the Claude desktop app keeps its own login. When the stored token
+has expired, the script runs `claude auth status` (at most once every ten
+minutes), which makes Claude Code renew it without sending a prompt. If
+`claude` is not on the PATH, the bar says to run it in a terminal.
+
 The shell reloads plugin code when a file under `~/.config/omarchy/plugins/`
 changes. If an edit does not show up, run `omarchy restart shell`.
 
